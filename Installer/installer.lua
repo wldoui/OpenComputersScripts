@@ -5,23 +5,19 @@
 -- Minecraft 1.12.2
 -- OpenComputers 1.8.9a
 --
--- SOURCE:
--- https://github.com/wldoui/OpenComputersScripts/tree/main/Space/oc_space_control
+-- Repository:
+-- https://github.com/wldoui/OpenComputersScripts
 --
--- INSTALLS:
+-- Source:
+-- Space/oc_space_control
+--
+-- Installs:
 --   /boot.lua
 --   /api_inspector.lua
 --   /apps/*
 --   /data/*
 --   /drivers/*
 --   /lib/*
---
--- REQUIREMENTS:
---   Internet Card
---   writable filesystem
---
--- USAGE:
---   install.lua
 -- ================================================================
 
 local component = require("component")
@@ -30,10 +26,7 @@ local term = require("term")
 local filesystem = require("filesystem")
 
 local internet = nil
-
--- ================================================================
--- CONFIG
--- ================================================================
+local serialization = nil
 
 local API_BASE =
     "https://api.github.com/repos/wldoui/OpenComputersScripts/contents/Space/oc_space_control"
@@ -41,33 +34,53 @@ local API_BASE =
 local RAW_BASE =
     "https://raw.githubusercontent.com/wldoui/OpenComputersScripts/main/Space/oc_space_control"
 
-local INSTALL_ROOT = "/"
-
 local VERSION_FILE = "/.open_space_control"
 
--- Files/directories we expect from the repository.
-local EXPECTED = {
-    "boot.lua",
-    "api_inspector.lua",
-    "apps",
-    "data",
-    "drivers",
-    "lib"
-}
+local installedFiles = 0
+local failedFiles = 0
+
+-- ================================================================
+-- SERIALIZATION
+-- ================================================================
+
+do
+    local ok, result = pcall(require, "serialization")
+
+    if ok then
+        serialization = result
+    end
+end
 
 -- ================================================================
 -- UI
 -- ================================================================
 
-local function line()
+local function clear()
+    pcall(term.clear)
+    pcall(term.setCursor, 1, 1)
+end
+
+local function separator()
     print("------------------------------------------------------------")
 end
 
+local function ok(text)
+    print("[OK] " .. text)
+end
+
+local function fail(text)
+    print("[ERROR] " .. text)
+end
+
+local function warn(text)
+    print("[WARN] " .. text)
+end
+
 local function title()
-    term.clear()
+    clear()
 
     print("============================================================")
-    print("              OPEN SPACE CONTROL INSTALLER")
+    print("       OPEN SPACE CONTROL INSTALLER")
     print("============================================================")
     print("")
     print("Repository:")
@@ -78,51 +91,148 @@ local function title()
     print("")
 end
 
-local function ok(message)
-    print("[OK] " .. message)
-end
-
-local function warn(message)
-    print("[WARN] " .. message)
-end
-
-local function fail(message)
-    print("[ERROR] " .. message)
-end
-
 -- ================================================================
--- INTERNET
+-- FILESYSTEM
 -- ================================================================
 
-local function findInternet()
-    if component.isAvailable("internet") then
-        local address = component.list("internet")()
+local function filesystemWritable()
+    -- OpenComputers/OpenOS versions differ slightly in the
+    -- filesystem API. Instead of trusting isReadOnly(), actually
+    -- test whether we can create and delete a file.
 
-        if address then
-            local success, proxy = pcall(component.proxy, address)
+    local testPath = "/.osc_write_test"
 
-            if success and proxy then
-                internet = proxy
-                return true
-            end
+    -- If a stale test file exists, try removing it first.
+    if filesystem.exists(testPath) then
+        pcall(filesystem.remove, testPath)
+    end
+
+    local handle, err = io.open(testPath, "w")
+
+    if not handle then
+        return false, tostring(err or "cannot create test file")
+    end
+
+    local writeOK, writeError = pcall(function()
+        handle:write("OPEN SPACE CONTROL WRITE TEST")
+    end)
+
+    handle:close()
+
+    if not writeOK then
+        pcall(filesystem.remove, testPath)
+        return false, tostring(writeError)
+    end
+
+    local exists = filesystem.exists(testPath)
+
+    pcall(filesystem.remove, testPath)
+
+    if not exists then
+        return false, "file was not created"
+    end
+
+    return true
+end
+
+local function ensureDirectory(path)
+    if filesystem.exists(path) then
+        if filesystem.isDirectory(path) then
+            return true
+        end
+
+        return false,
+            "Path exists but is not a directory: " .. path
+    end
+
+    local okMake, result =
+        pcall(filesystem.makeDirectory, path)
+
+    if not okMake then
+        return false, tostring(result)
+    end
+
+    if not filesystem.exists(path) then
+        return false, "directory was not created"
+    end
+
+    return true
+end
+
+local function writeFile(path, data)
+    local directory = filesystem.path(path)
+
+    if directory and directory ~= "" then
+        local okDir, dirError =
+            ensureDirectory(directory)
+
+        if not okDir then
+            return false, dirError
         end
     end
 
-    return false
+    local handle, err = io.open(path, "w")
+
+    if not handle then
+        return false, tostring(err)
+    end
+
+    local okWrite, writeError =
+        pcall(function()
+            handle:write(data)
+        end)
+
+    handle:close()
+
+    if not okWrite then
+        return false, tostring(writeError)
+    end
+
+    return true
 end
 
 -- ================================================================
--- HTTP GET
+-- INTERNET CARD
+-- ================================================================
+
+local function findInternet()
+    local address
+
+    for addr in component.list("internet", true) do
+        address = addr
+        break
+    end
+
+    if not address then
+        return false
+    end
+
+    local success, proxy =
+        pcall(component.proxy, address)
+
+    if not success or not proxy then
+        return false
+    end
+
+    internet = proxy
+
+    return true
+end
+
+-- ================================================================
+-- HTTP
 -- ================================================================
 
 local function httpGet(url)
+
     if not internet then
-        return nil, "Internet component unavailable"
+        return nil, "Internet Card is not available"
     end
 
-    local success, handle = pcall(internet.request, url)
+    local okRequest, handle =
+        pcall(internet.request, url)
 
-    if not success then
+    if not okRequest then
         return nil, tostring(handle)
     end
 
@@ -133,20 +243,23 @@ local function httpGet(url)
     local chunks = {}
 
     while true do
-        local successRead, data = pcall(handle.read, handle, 4096)
 
-        if not successRead then
+        local okRead, data =
+            pcall(handle.read, 4096)
+
+        if not okRead then
+            pcall(handle.close)
             return nil, tostring(data)
         end
 
-        if not data then
+        if data == nil then
             break
         end
 
         chunks[#chunks + 1] = data
     end
 
-    pcall(handle.close, handle)
+    pcall(handle.close)
 
     return table.concat(chunks)
 end
@@ -155,24 +268,17 @@ end
 -- JSON
 -- ================================================================
 
-local serialization = nil
-
-do
-    local success, result = pcall(require, "serialization")
-
-    if success then
-        serialization = result
-    end
-end
-
 local function decodeJSON(data)
+
     if not serialization then
-        return nil, "serialization library unavailable"
+        return nil,
+            "serialization library unavailable"
     end
 
-    local success, result = pcall(serialization.unserialize, data)
+    local okDecode, result =
+        pcall(serialization.unserialize, data)
 
-    if not success then
+    if not okDecode then
         return nil, tostring(result)
     end
 
@@ -180,92 +286,11 @@ local function decodeJSON(data)
 end
 
 -- ================================================================
--- FILESYSTEM
+-- GITHUB DIRECTORY
 -- ================================================================
 
-local function ensureDirectory(path)
-    if filesystem.exists(path) then
-        if filesystem.isDirectory(path) then
-            return true
-        end
+local function githubDirectory(path)
 
-        return false, "Path exists but is not a directory: " .. path
-    end
-
-    local success, err = pcall(filesystem.makeDirectory, path)
-
-    if not success then
-        return false, tostring(err)
-    end
-
-    return filesystem.exists(path)
-end
-
-local function writeFile(path, data)
-    local directory = filesystem.path(path)
-
-    local success, err = ensureDirectory(directory)
-
-    if not success then
-        return false, err
-    end
-
-    local handle, openError = io.open(path, "w")
-
-    if not handle then
-        return false, tostring(openError)
-    end
-
-    local writeSuccess, writeError =
-        pcall(function()
-            handle:write(data)
-        end)
-
-    handle:close()
-
-    if not writeSuccess then
-        return false, tostring(writeError)
-    end
-
-    return true
-end
-
--- ================================================================
--- DIRECTORY CREATION
--- ================================================================
-
-local function createBaseDirectories()
-    print("Creating directory structure...")
-    print("")
-
-    local directories = {
-        "/apps",
-        "/data",
-        "/drivers",
-        "/lib"
-    }
-
-    for _, directory in ipairs(directories) do
-        local success, err = ensureDirectory(directory)
-
-        if success then
-            ok(directory)
-        else
-            fail(directory .. " -> " .. tostring(err))
-            return false
-        end
-    end
-
-    print("")
-
-    return true
-end
-
--- ================================================================
--- GITHUB DIRECTORY LISTING
--- ================================================================
-
-local function getDirectory(path)
     local url = API_BASE
 
     if path and path ~= "" then
@@ -278,35 +303,44 @@ local function getDirectory(path)
         return nil, err
     end
 
-    local decoded, decodeError = decodeJSON(data)
+    local result, decodeError =
+        decodeJSON(data)
 
-    if not decoded then
+    if not result then
         return nil, decodeError
     end
 
-    return decoded
+    return result
 end
 
 -- ================================================================
--- FILE DOWNLOAD
+-- DOWNLOAD FILE
 -- ================================================================
 
 local function downloadFile(relativePath)
-    local url = RAW_BASE .. "/" .. relativePath
 
     print("")
     print("Downloading:")
     print("  " .. relativePath)
 
-    local data, err = httpGet(url)
+    local url =
+        RAW_BASE .. "/" .. relativePath
+
+    local data, err =
+        httpGet(url)
 
     if not data then
         fail(relativePath)
         print("  " .. tostring(err))
+
+        failedFiles =
+            failedFiles + 1
+
         return false
     end
 
-    local destination = "/" .. relativePath
+    local destination =
+        "/" .. relativePath
 
     local success, writeError =
         writeFile(destination, data)
@@ -314,27 +348,35 @@ local function downloadFile(relativePath)
     if not success then
         fail(relativePath)
         print("  " .. tostring(writeError))
+
+        failedFiles =
+            failedFiles + 1
+
         return false
     end
 
     ok(relativePath)
 
+    installedFiles =
+        installedFiles + 1
+
     return true
 end
 
 -- ================================================================
--- RECURSIVE REPOSITORY INSTALL
+-- RECURSIVE INSTALL
 -- ================================================================
 
-local installedFiles = 0
-local failedFiles = 0
-
 local function installDirectory(relativePath)
-    local entries, err = getDirectory(relativePath)
+
+    local entries, err =
+        githubDirectory(relativePath)
 
     if not entries then
-        fail("Cannot read GitHub directory: " ..
-            tostring(relativePath))
+        fail(
+            "Cannot access GitHub directory: " ..
+            tostring(relativePath)
+        )
 
         print("Reason: " .. tostring(err))
 
@@ -342,7 +384,9 @@ local function installDirectory(relativePath)
     end
 
     if type(entries) ~= "table" then
-        fail("GitHub returned invalid directory data")
+        fail(
+            "GitHub returned unexpected data"
+        )
 
         return false
     end
@@ -360,30 +404,34 @@ local function installDirectory(relativePath)
                     relativePath .. "/" .. entry.name
             end
 
-            local localDirectory =
+            local localPath =
                 "/" .. childPath
 
-            local success, directoryError =
-                ensureDirectory(localDirectory)
+            local okDir, dirError =
+                ensureDirectory(localPath)
 
-            if not success then
+            if not okDir then
+
                 fail(
                     "Cannot create " ..
-                    localDirectory ..
-                    ": " ..
-                    tostring(directoryError)
+                    localPath
+                )
+
+                print(
+                    "  " ..
+                    tostring(dirError)
                 )
 
                 return false
             end
 
             print("")
-            print("[DIR] " .. localDirectory)
+            print("[DIR] " .. localPath)
 
-            local recursiveSuccess =
+            local recursiveOK =
                 installDirectory(childPath)
 
-            if not recursiveSuccess then
+            if not recursiveOK then
                 return false
             end
 
@@ -398,13 +446,7 @@ local function installDirectory(relativePath)
                     relativePath .. "/" .. entry.name
             end
 
-            if downloadFile(childPath) then
-                installedFiles =
-                    installedFiles + 1
-            else
-                failedFiles =
-                    failedFiles + 1
-            end
+            downloadFile(childPath)
         end
     end
 
@@ -412,37 +454,46 @@ local function installDirectory(relativePath)
 end
 
 -- ================================================================
--- VERSION INFORMATION
+-- VERSION
 -- ================================================================
 
-local function writeVersionFile()
-    local content =
+local function saveVersion()
+
+    local version =
         "OPEN SPACE CONTROL\n" ..
         "Repository: wldoui/OpenComputersScripts\n" ..
         "Path: Space/oc_space_control\n" ..
         "Branch: main\n" ..
-        "Installed: " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n"
+        "Installed: " ..
+        os.date("%Y-%m-%d %H:%M:%S") ..
+        "\n"
 
-    writeFile(VERSION_FILE, content)
+    writeFile(
+        VERSION_FILE,
+        version
+    )
 end
 
 -- ================================================================
--- VERIFY INSTALLATION
+-- VERIFY
 -- ================================================================
 
-local function verifyInstallation()
-    print("")
-    line()
+local function verify()
+
+    separator()
+
     print("VERIFYING INSTALLATION")
-    line()
+
+    separator()
+
     print("")
 
-    local requiredFiles = {
+    local files = {
         "/boot.lua",
         "/api_inspector.lua"
     }
 
-    local requiredDirectories = {
+    local directories = {
         "/apps",
         "/data",
         "/drivers",
@@ -451,25 +502,58 @@ local function verifyInstallation()
 
     local valid = true
 
-    for _, path in ipairs(requiredFiles) do
+    for _, path in ipairs(files) do
+
         if filesystem.exists(path) then
             ok(path)
         else
-            fail(path .. " is missing")
+            fail(path .. " missing")
             valid = false
         end
     end
 
-    for _, path in ipairs(requiredDirectories) do
-        if filesystem.exists(path) and filesystem.isDirectory(path) then
+    for _, path in ipairs(directories) do
+
+        if filesystem.exists(path)
+            and filesystem.isDirectory(path) then
+
             ok(path)
+
         else
-            fail(path .. " is missing")
+
+            fail(path .. " missing")
+
             valid = false
         end
     end
 
     return valid
+end
+
+-- ================================================================
+-- BOOT
+-- ================================================================
+
+local function startSystem()
+
+    print("")
+    print("Starting OPEN SPACE CONTROL...")
+    print("")
+
+    if not filesystem.exists("/boot.lua") then
+        fail("/boot.lua does not exist")
+        return
+    end
+
+    local okBoot, bootError =
+        pcall(dofile, "/boot.lua")
+
+    if not okBoot then
+        print("")
+        fail("boot.lua crashed")
+        print("")
+        print(tostring(bootError))
+    end
 end
 
 -- ================================================================
@@ -481,67 +565,91 @@ local function main()
     title()
 
     -- ------------------------------------------------------------
-    -- Filesystem
+    -- FILESYSTEM
     -- ------------------------------------------------------------
 
     print("Checking filesystem...")
 
-    if not filesystem.isReadOnly() then
-        ok("Filesystem is writable")
-    else
-        fail("Filesystem is READ-ONLY")
+    local writable, writeError =
+        filesystemWritable()
+
+    if not writable then
+
+        fail("Filesystem is not writable")
+
         print("")
-        print("Install OpenOS onto a writable disk first.")
+        print(
+            "Reason: " ..
+            tostring(writeError)
+        )
+
+        print("")
+        print(
+            "Install OpenOS on a writable filesystem."
+        )
+
         return
     end
+
+    ok("Filesystem is writable")
 
     print("")
 
     -- ------------------------------------------------------------
-    -- Internet
+    -- INTERNET
     -- ------------------------------------------------------------
 
     print("Checking Internet Card...")
 
-    if findInternet() then
-        ok("Internet Card detected")
-    else
-        fail("Internet Card not detected")
+    if not findInternet() then
+
+        fail("Internet Card not found")
+
         print("")
-        print("Install an Internet Card into the computer.")
-        print("Then connect it to the computer/network as required.")
+        print(
+            "Install an Internet Card into this computer."
+        )
+
         return
     end
 
+    ok("Internet Card detected")
+
     print("")
 
     -- ------------------------------------------------------------
-    -- GitHub connection
+    -- GITHUB
     -- ------------------------------------------------------------
 
     print("Testing GitHub connection...")
-    print("")
 
-    local testData, testError =
+    local data, err =
         httpGet(API_BASE)
 
-    if not testData then
+    if not data then
+
         fail("GitHub connection failed")
+
         print("")
-        print(tostring(testError))
+        print(tostring(err))
+
         return
     end
 
     ok("GitHub reachable")
 
-    -- Make sure response can actually be decoded.
     local decoded, decodeError =
-        decodeJSON(testData)
+        decodeJSON(data)
 
     if not decoded then
-        fail("GitHub API response could not be parsed")
+
+        fail(
+            "GitHub API response invalid"
+        )
+
         print("")
         print(tostring(decodeError))
+
         return
     end
 
@@ -550,93 +658,185 @@ local function main()
     print("")
 
     -- ------------------------------------------------------------
-    -- Directories
+    -- DIRECTORIES
     -- ------------------------------------------------------------
 
-    if not createBaseDirectories() then
-        return
+    print("Preparing directories...")
+    print("")
+
+    local directories = {
+        "/apps",
+        "/data",
+        "/drivers",
+        "/lib"
+    }
+
+    for _, path in ipairs(directories) do
+
+        local success, err =
+            ensureDirectory(path)
+
+        if not success then
+
+            fail(path)
+
+            print(
+                "  " ..
+                tostring(err)
+            )
+
+            return
+        end
+
+        ok(path)
     end
 
+    print("")
+
     -- ------------------------------------------------------------
-    -- Installation
+    -- INSTALL
     -- ------------------------------------------------------------
 
-    line()
+    separator()
+
     print("DOWNLOADING OPEN SPACE CONTROL")
-    line()
+
+    separator()
+
     print("")
 
-    print("Source:")
-    print(API_BASE)
+    print(
+        "Source:"
+    )
+
+    print(
+        API_BASE
+    )
+
     print("")
 
-    local success =
+    local installOK =
         installDirectory("")
 
-    if not success then
+    if not installOK then
+
         print("")
-        fail("Installation encountered a fatal error")
+        fail(
+            "Installation encountered an error."
+        )
+
         return
     end
 
     -- ------------------------------------------------------------
-    -- Version
+    -- VERSION
     -- ------------------------------------------------------------
 
-    writeVersionFile()
+    saveVersion()
 
     -- ------------------------------------------------------------
-    -- Verification
+    -- VERIFY
     -- ------------------------------------------------------------
 
     local verified =
-        verifyInstallation()
+        verify()
 
     print("")
-    line()
+
+    separator()
+
     print("INSTALLATION RESULT")
-    line()
+
+    separator()
+
     print("")
 
-    print("Files installed: " .. tostring(installedFiles))
-    print("Files failed:    " .. tostring(failedFiles))
+    print(
+        "Files installed: " ..
+        tostring(installedFiles)
+    )
+
+    print(
+        "Files failed:    " ..
+        tostring(failedFiles)
+    )
+
     print("")
 
     if not verified or failedFiles > 0 then
-        fail("Installation is incomplete.")
+
+        fail(
+            "Installation is incomplete."
+        )
+
         print("")
-        print("DO NOT start OPEN SPACE CONTROL yet.")
+        print(
+            "Do not start Open Space Control yet."
+        )
+
         return
     end
 
-    print("============================================================")
-    print(" INSTALLATION COMPLETE")
-    print("============================================================")
-    print("")
-    print("Installed:")
-    print("  /boot.lua")
-    print("  /api_inspector.lua")
-    print("  /apps/")
-    print("  /data/")
-    print("  /drivers/")
-    print("  /lib/")
-    print("")
-    print("Run:")
-    print("")
-    print("  boot.lua")
-    print("")
-    print("or:")
-    print("")
-    print("  /boot.lua")
+    print(
+        "============================================================"
+    )
+
+    print(
+        "       INSTALLATION COMPLETE"
+    )
+
+    print(
+        "============================================================"
+    )
+
     print("")
 
-    -- ------------------------------------------------------------
-    -- Ask whether to start
-    -- ------------------------------------------------------------
+    print(
+        "Installed:"
+    )
 
-    term.write("Start OPEN SPACE CONTROL now? [Y/n] ")
+    print(
+        "  /boot.lua"
+    )
 
-    local answer = term.read()
+    print(
+        "  /api_inspector.lua"
+    )
+
+    print(
+        "  /apps/"
+    )
+
+    print(
+        "  /data/"
+    )
+
+    print(
+        "  /drivers/"
+    )
+
+    print(
+        "  /lib/"
+    )
+
+    print("")
+
+    print(
+        "Run:"
+    )
+
+    print(
+        "  /boot.lua"
+    )
+
+    print("")
+
+    term.write(
+        "Start OPEN SPACE CONTROL now? [Y/n] "
+    )
+
+    local answer =
+        term.read()
 
     if answer then
         answer =
@@ -645,26 +845,22 @@ local function main()
         answer = ""
     end
 
-    if answer == "" or answer == "y" or answer == "yes" then
+    if answer == ""
+        or answer == "y"
+        or answer == "yes" then
 
-        print("")
-        print("Starting OPEN SPACE CONTROL...")
-        print("")
-
-        local successBoot, bootError =
-            pcall(dofile, "/boot.lua")
-
-        if not successBoot then
-            print("")
-            fail("boot.lua crashed")
-            print(tostring(bootError))
-        end
+        startSystem()
 
     else
 
         print("")
-        print("Installation finished.")
-        print("Run /boot.lua when ready.")
+        print(
+            "Installation finished."
+        )
+
+        print(
+            "Run /boot.lua when ready."
+        )
     end
 end
 
