@@ -269,19 +269,16 @@ end
 -- ================================================================
 
 local function decodeJSON(data)
-
-    if not serialization then
-        return nil,
-            "serialization library unavailable"
+    if not json then
+        return nil, "json library unavailable"
     end
-
-    local okDecode, result =
-        pcall(serialization.unserialize, data)
-
+    
+    local okDecode, result = pcall(json.decode, data)
+    
     if not okDecode then
         return nil, tostring(result)
     end
-
+    
     return result
 end
 
