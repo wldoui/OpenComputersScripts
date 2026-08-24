@@ -1,19 +1,3 @@
--- space_view.lua
--- Pseudo-3D Space Control viewer for OpenComputers + HBM Space (NTM-Space 0.9.2).
---
--- Renders entirely on the GPU/Screen (no hologram projector, no world voxels).
--- Uses ONLY documented ntm_stardar / ntm_rocket_pad callbacks -- nothing here
--- is invented. Where the API genuinely has no data (object positions,
--- rocket-in-flight telemetry), the UI says so explicitly instead of
--- making numbers up.
---
--- REQUIRES:
---   /lib/vector3.lua
---   /lib/render3d.lua
---   an OC cable wired directly into the StarDar CORE block (metadata >= 12)
---   optionally: an ntm_rocket_pad on the same network, for pad status
---
--- RUN: space_view
 
 local component = require("component")
 local event = require("event")
@@ -21,20 +5,20 @@ local term = require("term")
 local keyboard = require("keyboard")
 local Vector3 = require("vector3")
 local Render3D = require("render3d")
-
+ 
 local gpu = component.gpu
-
+ 
 --------------------------------------------------------------------------
 -- Component discovery (never assumes -- always checks)
 --------------------------------------------------------------------------
-
+ 
 local function firstOfType(ctype)
   for address in component.list(ctype) do
     return component.proxy(address)
   end
   return nil
 end
-
+ 
 local stardar = firstOfType("ntm_stardar")
 if not stardar then
   io.stderr:write("No 'ntm_stardar' component found on this network.\n")
@@ -42,13 +26,13 @@ if not stardar then
   io.stderr:write("(the block with metadata >= 12), then retry.\n")
   return
 end
-
+ 
 local rocketPad = firstOfType("ntm_rocket_pad") -- optional
-
+ 
 --------------------------------------------------------------------------
 -- Small helpers
 --------------------------------------------------------------------------
-
+ 
 local function fmt(v)
   if v == nil then return "N/A" end
   if type(v) == "boolean" then return v and "yes" or "no" end
@@ -58,7 +42,7 @@ local function fmt(v)
   end
   return tostring(v)
 end
-
+ 
 -- Calls fn(...) safely and packs *all* return values (component proxy
 -- calls can return a variable-length "list" per the HBM wiki).
 local function safePack(fn, ...)
@@ -68,35 +52,35 @@ local function safePack(fn, ...)
   end
   return packed
 end
-
+ 
 --------------------------------------------------------------------------
 -- Screen layout
 --------------------------------------------------------------------------
-
+ 
 local screenW, screenH = gpu.getResolution()
 local HEADER_H = 2
 local FOOTER_H = 2
 local PANEL_W = 28
-
+ 
 local viewX, viewY = 1, HEADER_H + 1
 local viewW = screenW - PANEL_W - 1
 local viewH = screenH - HEADER_H - FOOTER_H
 local panelX = viewW + 2
-
+ 
 --------------------------------------------------------------------------
 -- Camera
 --------------------------------------------------------------------------
-
+ 
 local camera = Render3D.Camera.new()
 camera.distance = 28
-
+ 
 --------------------------------------------------------------------------
 -- Scene / data model
 --------------------------------------------------------------------------
-
+ 
 local PLANET_VISUAL_RADIUS = 9  -- stylised render size, NOT to scale
 local MOON_ORBIT_RADIUS = 17
-
+ 
 local scene = {
   planetName = nil,
   planetStats = nil,
@@ -105,7 +89,7 @@ local scene = {
   padStatus = nil,
   screenObjects = {}, -- rebuilt every frame, used for click-selection
 }
-
+ 
 local function fetchPlanetStats(name)
   local packed, err = safePack(stardar.getPlanetStats, name)
   if not packed then return nil, err end
@@ -119,7 +103,7 @@ local function fetchPlanetStats(name)
     orbitalPeriod = packed[15],
   }
 end
-
+ 
 local function fetchMoonNames(name)
   local packed, err = safePack(stardar.getSatellites, name)
   if not packed then return {}, err end
@@ -130,16 +114,16 @@ local function fetchMoonNames(name)
   end
   return names
 end
-
+ 
 local function fetchRocketPadStatus()
   if not rocketPad then return nil end
   local status = {}
-
+ 
   local energyPacked = safePack(rocketPad.getEnergyInfo)
   if energyPacked then
     status.energy, status.energyMax = energyPacked[2], energyPacked[3]
   end
-
+ 
   local fuelPacked = safePack(rocketPad.getFuel)
   if fuelPacked then
     status.fuelTanks = {}
@@ -151,15 +135,15 @@ local function fetchRocketPadStatus()
       i = i + 3
     end
   end
-
+ 
   local solidPacked = safePack(rocketPad.getSolidFuel)
   if solidPacked then
     status.solidFuel, status.solidFuelMax = solidPacked[2], solidPacked[3]
   end
-
+ 
   local canPacked = safePack(rocketPad.canLaunch)
   if canPacked then status.canLaunch = canPacked[2] end
-
+ 
   local statsPacked = safePack(rocketPad.getRocketStats)
   if statsPacked and statsPacked[2] ~= nil then
     status.stages, status.launchMass, status.height =
@@ -167,28 +151,28 @@ local function fetchRocketPadStatus()
   elseif statsPacked then
     status.rocketError = statsPacked[3] or "No rocket on pad."
   end
-
+ 
   local destPacked = safePack(rocketPad.getDestination)
   if destPacked and destPacked[2] ~= nil then
     status.destination = destPacked[2]
   elseif destPacked then
     status.destinationError = destPacked[3] or "No destination."
   end
-
+ 
   return status
 end
-
+ 
 local function refreshData()
   local ok, planetName = pcall(function() return stardar.getCurrentPlanet() end)
   scene.planetName = ok and planetName or ("ERROR: " .. tostring(planetName))
-
+ 
   scene.planetMesh = Render3D.generateBlockyPlanet(PLANET_VISUAL_RADIUS, 6)
-
+ 
   scene.moons = {}
   if ok then
     local stats = fetchPlanetStats(planetName)
     scene.planetStats = stats
-
+ 
     local moonNames = fetchMoonNames(planetName)
     local count = math.max(#moonNames, 1)
     for i, mname in ipairs(moonNames) do
@@ -201,18 +185,18 @@ local function refreshData()
       scene.moons[#scene.moons + 1] = { name = mname, localPos = pos }
     end
   end
-
+ 
   scene.padStatus = fetchRocketPadStatus()
 end
-
+ 
 --------------------------------------------------------------------------
 -- Rendering
 --------------------------------------------------------------------------
-
+ 
 local function project(pos)
   return camera:project(pos, viewW, viewH)
 end
-
+ 
 local function renderViewport()
   local buf, depthBuf = {}, {}
   for y = 1, viewH do
@@ -223,9 +207,9 @@ local function renderViewport()
       depthBuf[y][x] = math.huge
     end
   end
-
+ 
   local lightDir = Vector3.new(0.4, 0.8, 0.4):normalize()
-
+ 
   -- Planet surface
   if scene.planetMesh then
     for _, cell in ipairs(scene.planetMesh) do
@@ -242,9 +226,9 @@ local function renderViewport()
       end
     end
   end
-
+ 
   scene.screenObjects = {}
-
+ 
   -- Moons (layout markers)
   for _, moon in ipairs(scene.moons) do
     local sx, sy = project(moon.localPos)
@@ -258,7 +242,7 @@ local function renderViewport()
       end
     end
   end
-
+ 
   -- Rocket pad marker (static ground marker -- no in-flight position exists)
   if rocketPad then
     local padPos = Vector3.new(PLANET_VISUAL_RADIUS + 4, 0, 0)
@@ -273,14 +257,14 @@ local function renderViewport()
       end
     end
   end
-
+ 
   gpu.setBackground(0x000000)
   gpu.setForeground(0x33CCFF)
   for y = 1, viewH do
     gpu.set(viewX, viewY + y - 1, table.concat(buf[y]))
   end
 end
-
+ 
 local function drawHeader()
   gpu.setBackground(0x000000)
   gpu.setForeground(0xFFFFFF)
@@ -288,20 +272,20 @@ local function drawHeader()
   gpu.set(2, 1, "OPEN SPACE CONTROL // STAR DAR")
   gpu.set(2, 2, string.rep("-", screenW - 2))
 end
-
+ 
 local function drawFooter()
   gpu.fill(1, screenH - FOOTER_H + 1, screenW, FOOTER_H, " ")
   gpu.set(2, screenH - FOOTER_H + 1, string.rep("-", screenW - 2))
   gpu.set(2, screenH, "[WASD] rotate [E/Z] zoom [click] select [r] refresh [esc] quit")
 end
-
+ 
 local selected = nil
-
+ 
 local function drawPanel()
   gpu.setBackground(0x000000)
   gpu.setForeground(0xFFFFFF)
   gpu.fill(panelX, viewY, PANEL_W, viewH, " ")
-
+ 
   local y = viewY
   local function line(text)
     if y <= viewY + viewH - 1 then
@@ -309,7 +293,7 @@ local function drawPanel()
       y = y + 1
     end
   end
-
+ 
   if selected then
     line("SELECTED:")
     line(tostring(selected.name))
@@ -378,11 +362,11 @@ local function drawPanel()
     end
   end
 end
-
+ 
 --------------------------------------------------------------------------
 -- Interaction
 --------------------------------------------------------------------------
-
+ 
 local function trySelect(x, y)
   local best, bestDist
   for _, obj in ipairs(scene.screenObjects) do
@@ -398,29 +382,29 @@ local function trySelect(x, y)
     selected = nil
   end
 end
-
+ 
 --------------------------------------------------------------------------
 -- Main loop
 --------------------------------------------------------------------------
-
+ 
 local function redraw()
   renderViewport()
   drawPanel()
 end
-
+ 
 drawHeader()
 drawFooter()
 refreshData()
 redraw()
-
+ 
 local running = true
 local lastDrag = nil
-
+ 
 while running do
   local e = { event.pull(0.5) }
   local ename = e[1]
   local needsRedraw = false
-
+ 
   if ename == "key_down" then
     local code = e[4]
     if code == keyboard.keys.escape or code == keyboard.keys.q then
@@ -456,13 +440,13 @@ while running do
     camera.distance = math.max(12, math.min(60, camera.distance - dir * 2))
     needsRedraw = true
   end
-
+ 
   if ename ~= "drag" then lastDrag = nil end
-
+ 
   if needsRedraw then
     redraw()
   end
 end
-
+ 
 term.clear()
 print("Space Control closed.")
