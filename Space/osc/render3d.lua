@@ -128,12 +128,13 @@ local COLOR_STOPS = {
 local function lerp(a, b, t) return a + (b - a) * t end
 
 local function lerpColor(c1, c2, t)
-  local r1, g1, b1 = (c1 >> 16) & 0xFF, (c1 >> 8) & 0xFF, c1 & 0xFF
-  local r2, g2, b2 = (c2 >> 16) & 0xFF, (c2 >> 8) & 0xFF, c2 & 0xFF
+  -- Bit-shift-free colour math (works on Lua 5.2 and 5.3 OC builds alike).
+  local r1, g1, b1 = math.floor(c1 / 65536) % 256, math.floor(c1 / 256) % 256, c1 % 256
+  local r2, g2, b2 = math.floor(c2 / 65536) % 256, math.floor(c2 / 256) % 256, c2 % 256
   local r = math.floor(lerp(r1, r2, t) + 0.5)
   local g = math.floor(lerp(g1, g2, t) + 0.5)
   local b = math.floor(lerp(b1, b2, t) + 0.5)
-  return (r << 16) | (g << 8) | b
+  return r * 65536 + g * 256 + b
 end
 
 function Render3D.colorForBrightness(brightness)
